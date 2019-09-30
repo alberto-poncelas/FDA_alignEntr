@@ -1,4 +1,7 @@
 #include "fda.h"
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 const char *usage = "Usage: fda [opts] train1 test1 [train2] [test2]\n"
   "train1: first (mandatory) arg gives source language train file\n"
   "test1 : second (mandatory) arg gives source language test file\n"
@@ -12,6 +15,7 @@ const char *usage = "Usage: fda [opts] train1 test1 [train2] [test2]\n"
   "-v (1): verbosity level, -v0 no messages, -v2 more detail\n"
   "-n (3): maximum ngram order for features\n"
   "-t (0): number of training words output, -t0 means no limit\n"
+  "-T (0): number of training lines\n"
   "-o (null): output file, stdout is used if not specified\n"
   "The rest of the options are used to calculate feature and sentence scores:\n"
   "-i (1.0): initial feature score idf exponent\n"
@@ -19,16 +23,26 @@ const char *usage = "Usage: fda [opts] train1 test1 [train2] [test2]\n"
   "-d (0.5): final feature score decay factor\n"
   "-c (0.0): final feature score decay exponent\n"
   "-s (1.0): sentence score length exponent\n"
+  "-b: path of the file with the decay score of the n-grams (can also be used as values of decay exponent)\n"
+  "-m: path of the file with the decay score value of each n-gram\n"
+  "Parameter values of b:\n"
+  "'00' -> default\n"
+  "'10' -> decay factor\n"
+  "'01' -> decay exponent\n"
+  "'11' -> decay factor & exponent\n"
+  "\n"
   "Formulas:\n"
   "initial feature score: fscore0 = idf^i * ngram^l\n"
   "final feature score  : fscore1 = fscore0 * d^cnt * cnt^(-c)\n"
   "sentence score       : sscore  = sum_fscore1 * slen^(-s)\n"
+
 ;
 
 /* Default options */
 guint verbosity_level = 1;
 guint ngram_order = 3;
 guint max_output_words = 0;
+int max_lines = 0;
 double idf_exponent = 1.0;
 double ngram_length_exponent = 1.0;
 double decay_factor = 0.5;
@@ -39,29 +53,128 @@ char *test_file1 = NULL;
 char *train_file2 = NULL;
 char *test_file2 = NULL;
 char *output_file = NULL;
+int has_custom_decay_option = 0;
+int has_custom_decay_exp = 0;
+int has_custom_decay_factor = 0;
+char *ent_path = NULL;
+
+
+//char *filename="dict";
+#define MAXLINES 5000000
+int rd = 0; //readed lines
+char* words[MAXLINES];
+float scores[MAXLINES];
+
+
+
+static int load_dict()
+{
+  FILE *fp;
+  char buff[255];
+  //fp = fopen("dict", "r+");
+  fp = fopen(ent_path, "r+");
+  while ( fgets ( buff, sizeof buff, fp ) != NULL )
+  {
+
+    char *sc_string;
+    double sc = 0.0;
+    char *token = strtok(buff, "|");
+    while ((sc_string = strtok(NULL, " ")) != NULL){
+      //printf("%s \n",token, sc_string);
+      sc=atof(sc_string);
+    }
+    //fix rounding problem
+    if (sc==1.0) sc=0.999999999;
+    if (sc==0.0) sc=0.000000001;
+    //printf("%s | %.8f\n",token, sc);
+
+    words[rd] = (char*)malloc(strlen(token) + 1);
+    strcpy(words[rd], token);
+
+    if (sc >= 1 || sc <= 0) {
+      printf("custom decay is not in the range (0,1). The gram %s has a value of %f",words[rd],sc);
+      exit(0);
+    }
+    scores[rd] = sc;
+    rd = rd + 1;
+  }
+  fclose(fp);
+  printf("Dictionary loaded. linear: %d, exponential: %d.\n",has_custom_decay_factor,has_custom_decay_exp);
+  return rd;
+}
+
+
+static float find_gram_value(char* ngr)
+{
+  char *ngr_value = (char*)malloc(strlen(ngr) + 1);
+  strcpy(ngr_value, ngr);
+  int t = 0;
+  for (t = 0 ; t < rd ; t++){
+    if (strcmp(ngr_value,words[t])==0 ){
+      return scores[t];
+    }
+  } 
+  //printf("not found ngram: |%s| \n",ngr);
+  return decay_factor;
+}
+
 
 int main(int argc, char **argv) {
+  printf("beginning execution...\n");
   g_message_init();
   int opt;
-  while ((opt = getopt(argc, argv, "v:t:n:s:i:l:d:c:o:")) != -1) {
+  while ((opt = getopt(argc, argv, "v:t:n:T:s:i:l:d:c:o:b:m:")) != -1) {
     switch (opt) {
     case 'v': verbosity_level = atoi(optarg); break;
     case 't': max_output_words = atoi(optarg); break;
     case 'n': ngram_order = atoi(optarg); break;
+    case 'T': max_lines = atoi(optarg); break;
     case 's': sentence_length_exponent = atof(optarg); break;
     case 'i': idf_exponent = atof(optarg); break;
     case 'l': ngram_length_exponent = atof(optarg); break;
     case 'd': decay_factor = atof(optarg); break;
     case 'c': decay_exponent = atof(optarg); break;
     case 'o': output_file = optarg; break;
+    case 'b': has_custom_decay_option = atoi(optarg); break;
+    case 'm': ent_path = optarg; break;
     default: g_error("ERROR: Bad option -%c\n%s", opt, usage); break;
     }
   }
+
+
+
+  if (has_custom_decay_option>0){
+    has_custom_decay_factor = has_custom_decay_option / 10;
+    has_custom_decay_exp = has_custom_decay_option % 10;
+  }
+
+ //printf("entdic: %s \n",ent_path);
+  if (ent_path != NULL){
+     printf("Loading entropies values \n");
+     rd=load_dict();
+     printf("Entropies dict loaded \n");
+  }
+
+ //exit;
 
   GPtrArray *test1 = NULL;
   GPtrArray *train1 = NULL;
   GPtrArray *test2 = NULL;
   GPtrArray *train2 = NULL;
+
+  printf("-s %f \n",sentence_length_exponent);
+  printf("-d %f \n",decay_factor);
+  printf("-c %f \n",decay_exponent);
+  printf("-T %d \n",max_lines);
+  printf("-n %d \n",ngram_order);
+  printf("-o %s \n",output_file);
+  if (ent_path != NULL){
+    printf("entropies values \n");
+    printf("-b %i \n",has_custom_decay_factor);
+    printf("-e %i \n",has_custom_decay_exp);
+  }
+
+
 
   if (decay_factor > 1 || decay_factor <= 0) {
     printf("%f is not in the range (0,1]",decay_factor);
@@ -71,6 +184,7 @@ int main(int argc, char **argv) {
     printf("%f is not in the range [0,)",decay_exponent);
     exit(0);
   }
+
 
   // optind is the first nonoption arg
   // Arguments order: First the options, then the nonoptions. 
@@ -112,6 +226,7 @@ int main(int argc, char **argv) {
   guint bigram_cnt2 = 0;
   msg2("init_features1");
   features1 = init_features(test1, &bigram_cnt1);
+
   if (test2 != NULL) {
     msg2("init_features2");
     features2 = init_features(test2, &bigram_cnt2);
@@ -130,6 +245,7 @@ int main(int argc, char **argv) {
   guint numsents = 0;
   
   msg2("Writing...");
+
   FILE *out = (output_file ? fopen(output_file, "w") : stdout);
   while (1) {
     if (heap.size() == 0) break;
@@ -143,8 +259,8 @@ int main(int argc, char **argv) {
     fprint_sentence(s1, out);
     if (train2 != NULL) {
       s2 = (Sentence) g_ptr_array_index(train2, best_sentence);
-      nword2 += sentence_size(s2);
-      bigram_match2 += update_counts(features2, s2);
+      nword2 =0;//+= sentence_size(s2);
+      bigram_match2 =0;//+= update_counts(features2, s2);
       fputc('\t', out); fprint_sentence(s2, out);
     }
     fprintf(out, "\t%g\t%d\t%d\t%d", best_score, nword1, bigram_cnt1, bigram_match1);
@@ -152,6 +268,7 @@ int main(int argc, char **argv) {
     fputc('\n', out);
     numsents += 1;
     if (max_output_words > 0 && nword1 >= max_output_words) break;
+    if (max_lines > 0 && numsents >= max_lines) break;
   }
   minialloc_free_all();
   
@@ -271,6 +388,42 @@ static guint next_best_training_instance(std::vector<Hpair> *heap, GPtrArray *se
   return best_sentence;
 }
 
+
+
+static float find_ng_decay(Sentence s) {
+  char res[999]="";
+  for (int i = 1; i <= sentence_size(s); i++) {
+    //if (i > 1) putchar(' ');
+    char *mys = (char*) token_to_string(s[i]);
+    //msg2("msg1.311: %s ",mys );
+    strcat(res," " );
+    strcat(res,mys );
+  }
+  memmove(res, res+1, strlen(res));//trim first space
+  //msg2("msg1.312: %s ", res );
+  float custom_decay = find_gram_value(res);
+  return custom_decay; //custom_decay
+}
+
+
+
+static float strcmpNg(Sentence s,char *str) {
+  char res[999]="";
+  for (int i = 1; i <= sentence_size(s); i++) {
+    char *mys = (char*) token_to_string(s[i]);
+    strcat(res," " );
+    strcat(res,mys );
+  }
+  memmove(res, res+1, strlen(res));//trim first space
+  return strcmp(res,str); //custom_decay
+}
+
+
+
+
+
+
+
 static guint update_counts(GHashTable *feat, Sentence s) {
   guint bigram_match = 0;
   foreach_ngram(ng, s) {
@@ -281,6 +434,13 @@ static guint update_counts(GHashTable *feat, Sentence s) {
       else if ((ngram_order == 1) && (ngram_size(ng) == 1) && (f->output_cnt == 0)) 
 	bigram_match++;
       f->output_cnt++;
+      float custom_decay = find_ng_decay(ng);
+      if (has_custom_decay_exp == 1){
+        decay_exponent=(1.0-custom_decay);//
+      }
+      if (has_custom_decay_factor == 1){
+        decay_factor=custom_decay;
+      }
       f->logscore1 = f->logscore0 + f->output_cnt * log(decay_factor) - decay_exponent * log(1.0 + f->output_cnt);
     }
   }
@@ -290,4 +450,7 @@ static guint update_counts(GHashTable *feat, Sentence s) {
 bool cmp(Hpair hp1, Hpair hp2) {
   return (hp1.val < hp2.val);
 }
+
+
+
 
